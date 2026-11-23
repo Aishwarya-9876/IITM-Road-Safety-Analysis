@@ -1,0 +1,12 @@
+SIGNBOARD IMAGE STATUS
+
+The project intentionally contains no placeholder or internet-sourced signboard illustrations.
+The signboard image area stays blank and displays “Image not available” until the original
+snapshot files referenced by backend/data/signs.csv are supplied.
+
+To add the real images, copy the original snapshot JPG files into:
+backend/public/snapshots/
+
+Keep the filenames exactly as listed in the CSV snapshot column. The backend automatically
+serves a matching snapshot when it exists. The IITM logo and campus-road background remain
+in public/images/.

@@ -1,0 +1,1 @@
+Add an IIT Madras campus road photo named iitm-campus-road.jpg here. The Home hero uses /images/iitm-campus-road.jpg.

@@ -1,18 +1,14 @@
 import express from "express";
 import cors from "cors";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "csv-parse/sync";
+import { pool } from "./db.js";
+import adminRouter from "./admin.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
-app.use("/snapshots", express.static(path.resolve(__dirname, "../public/snapshots")));
+app.use("/api/admin", adminRouter);
 
 const locations = [
   { id: "main-gate", name: "Main Gate", lat: 13.0061068, lon: 80.2423781 },
@@ -22,102 +18,39 @@ const locations = [
   { id: "velachery", name: "Velachery", lat: 12.9882910, lon: 80.2233049 }
 ];
 
-const descriptions = {
-  direction_board: {
-    name: "Direction Board", type: "Informational",
-    description: "Provides directions to campus destinations and helps visitors navigate the road network.",
-    usage: "Installed at junctions and decision points to guide pedestrians and vehicles."
-  },
-  speed_breaker: {
-    name: "Speed Breaker", type: "Cautionary",
-    description: "Warns road users about a raised speed breaker ahead.",
-    usage: "Placed before speed breakers to encourage drivers to slow down."
-  },
-  speed_limit: {
-    name: "Speed Limit", type: "Regulatory",
-    description: "Indicates the maximum permitted speed for vehicles.",
-    usage: "Used on campus roads to control vehicle speed and protect pedestrians."
-  },
-  walk_jog_facing_traffic: {
-    name: "Walk / Jog Facing Traffic", type: "Informational",
-    description: "Advises people walking or jogging to face oncoming traffic.",
-    usage: "Used where pedestrians and joggers share space with vehicles."
-  },
-  animal_crossing: {
-    name: "Animal Crossing", type: "Cautionary",
-    description: "Warns drivers that animals may cross the road.",
-    usage: "Placed in areas where animals are known to cross."
-  },
-  "barrier-falls": {
-    name: "Barrier / Fall Hazard", type: "Cautionary",
-    description: "Indicates a barrier or potential fall-related hazard near the road.",
-    usage: "Used to alert road users to physical obstructions or edge hazards."
-  },
-  "Cycle Path": {
-    name: "Cycle Path", type: "Informational",
-    description: "Identifies a path or lane intended for cyclists.",
-    usage: "Used to separate or guide bicycle movement around campus."
-  },
-  "Pedestrian Path": {
-    name: "Pedestrian Path", type: "Informational",
-    description: "Identifies a route intended for people walking.",
-    usage: "Used to guide pedestrians along designated walking paths."
-  },
-  "Do Not smoke": {
-    name: "Do Not Smoke", type: "Regulatory",
-    description: "Indicates that smoking is prohibited in the marked area.",
-    usage: "Displayed in smoke-free public, institutional and campus areas."
-  },
-  "No Parking": {
-    name: "No Parking", type: "Regulatory",
-    description: "Indicates that vehicles must not be parked in the marked area.",
-    usage: "Used to keep road edges, entrances and access routes clear."
-  },
-  Others: {
-    name: "Other Sign", type: "Other",
-    description: "A sign detected by the model that is not assigned to a specific supported class.",
-    usage: "Requires manual review to identify its exact meaning."
-  },
-  turn_sign: {
-    name: "Turn Sign", type: "Cautionary",
-    description: "Warns drivers about a turn or change in road direction ahead.",
-    usage: "Placed before bends and turning sections to encourage careful driving."
-  }
-};
+// Sign data lives in Postgres (see backend/README.md). `signs` holds one row per physical
+// board (already deduplicated by the Python pipeline); `sign_classes` holds display text.
+const OTHER = { name: "Other Sign", type: "Other", description: "", usage: "" };
 
-const snapshotsDir = path.resolve(__dirname, "../public/snapshots");
-
-// CSV values may look like "snapshots/example.jpg". Only the filename is
-// resolved inside backend/public/snapshots, preventing paths outside that folder.
-function getSnapshotImage(snapshotValue) {
-  if (!snapshotValue) return null;
-  const filename = path.basename(String(snapshotValue).replaceAll("\\", "/"));
-  if (!filename || filename === "." || filename === "..") return null;
-  const diskPath = path.resolve(snapshotsDir, filename);
-  if (!diskPath.startsWith(snapshotsDir + path.sep) || !fs.existsSync(diskPath) || !fs.statSync(diskPath).isFile()) return null;
-  return `/snapshots/${encodeURIComponent(filename)}`;
+async function loadSigns() {
+  const { rows } = await pool.query(`
+    select s.id, s.label, s.confidence, s.lat, s.lon, s.video, s.time_s, s.speed_kmh, s.frames_seen,
+           s.sightings, s.videos, s.detection_id,
+           c.name, c.type, c.description, c.usage, (d.snapshot is not null) as has_snapshot
+    from signs s
+    left join sign_classes c on c.label = s.label
+    left join detections d on d.id = s.detection_id
+    where s.lat is not null and s.lon is not null`);
+  return rows.map(r => ({
+    id: r.id, label: r.label, confidence: Number(r.confidence), lat: Number(r.lat), lon: Number(r.lon),
+    video: r.video, time_s: Number(r.time_s || 0), speed_kmh: Number(r.speed_kmh || 0),
+    frames_seen: Number(r.frames_seen || 0), sightings: Number(r.sightings || 1), videos: r.videos,
+    name: r.name || OTHER.name, type: r.type || OTHER.type,
+    description: r.description || OTHER.description, usage: r.usage || OTHER.usage,
+    image: r.has_snapshot ? `/snapshots/${r.detection_id}.jpg` : null
+  }));
 }
 
-const csvPath = path.resolve(__dirname, "../data/signs.csv");
-if (!fs.existsSync(csvPath)) {
-  throw new Error(`CSV dataset not found at ${csvPath}`);
-}
-const rows = parse(fs.readFileSync(csvPath, "utf8"), {
-  columns: true, skip_empty_lines: true, trim: true
-}).map(row => ({
-  id: Number(row.id),
-  label: row.label,
-  confidence: Number(row.confidence || 0),
-  lat: Number(row.lat),
-  lon: Number(row.lon),
-  video: row.video,
-  time_s: Number(row.time_s || 0),
-  speed_kmh: Number(row.speed_kmh || 0),
-  frames_seen: Number(row.frames_seen || 0),
-  sightings: Number(row.sightings || 1),
-  snapshot: row.snapshot,
-  description: row.description || ""
-}));
+// Snapshot JPEGs are stored in detections.snapshot (bytea).
+app.get("/snapshots/:id.jpg", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.sendStatus(404);
+    const { rows } = await pool.query("select snapshot from detections where id = $1", [id]);
+    if (!rows[0]?.snapshot) return res.sendStatus(404);
+    res.set("Cache-Control", "public, max-age=86400").type("jpg").send(rows[0].snapshot);
+  } catch (e) { next(e); }
+});
 
 // Convert coordinates to local metres for route projection.
 function toXY(lat, lon) {
@@ -144,26 +77,22 @@ function getRouteMetrics(startIndex,endIndex) {
   const minutes=Math.max(1,Math.round((km/15)*60));
   return { distanceKm:Number(km.toFixed(2)), distance:`${km.toFixed(2)} km`, estimatedMinutes:minutes, travelTime:`${minutes} min` };
 }
-function mergeNearbyDuplicates(items) {
-  const groups=[];
-  for(const item of items) {
-    const existing=groups.find(g => g.label===item.label && haversine(g,item)<18);
-    if(existing) {
-      existing.sightings += item.sightings;
-      existing.confidence = Math.max(existing.confidence,item.confidence);
-      existing.duplicateDetections += 1;
-      existing.sourceIds.push(item.id);
-      existing.frames_seen += item.frames_seen;
-    } else {
-      groups.push({...item, duplicateDetections:1, sourceIds:[item.id]});
-    }
-  }
-  return groups;
-}
-
-app.get("/api/health", (_req,res)=>res.json({status:"ok",datasetRows:rows.length}));
+app.get("/api/health", async (_req,res,next)=>{
+  try { await pool.query("select 1"); res.json({status:"ok"}); } catch(e) { next(e); }
+});
+// Dataset totals for the admin dashboard.
+app.get("/api/stats", async (_req,res,next)=>{
+  try {
+    const { rows:[r] } = await pool.query(`select
+      (select count(*) from signs)::int as signs,
+      (select count(*) from detections)::int as detections,
+      (select count(distinct label) from signs)::int as "signTypes",
+      (select count(*) from videos where status='done')::int as "sourceVideos"`);
+    res.json(r);
+  } catch(e) { next(e); }
+});
 app.get("/api/locations", (_req,res)=>res.json({locations}));
-app.get("/api/analysis", (req,res)=>{
+app.get("/api/analysis", async (req,res,next)=>{ try {
   const startId=req.query.start, endId=req.query.end;
   const startIndex=locations.findIndex(l=>l.id===startId);
   const endIndex=locations.findIndex(l=>l.id===endId);
@@ -174,6 +103,7 @@ app.get("/api/analysis", (req,res)=>{
   const routePoints=locations.slice(low,high+1);
   const xyPoints=routePoints.map(p=>toXY(p.lat,p.lon));
   const ascending = startIndex < endIndex;
+  const rows=await loadSigns();
   const candidates=[];
   for(const row of rows) {
     const point=toXY(row.lat,row.lon);
@@ -189,19 +119,16 @@ app.get("/api/analysis", (req,res)=>{
     }
     // A 70 m corridor keeps detections close to the selected campus road.
     if(best.distance<=70) {
-      const meta=descriptions[row.label] || descriptions.Others;
       candidates.push({
-        ...row, ...meta,
-        description: row.description,
-        image: getSnapshotImage(row.snapshot),
-        snapshotAvailable: Boolean(getSnapshotImage(row.snapshot)),
+        ...row,
+        snapshotAvailable: Boolean(row.image),
         distanceFromRouteM:Math.round(best.distance),
         routeProgressM:Math.round(best.progress),
       });
     }
   }
   candidates.sort((a,b)=>a.routeProgressM-b.routeProgressM);
-  const unique=mergeNearbyDuplicates(candidates);
+  const unique=candidates;  // already one row per board in the database
   if(!ascending) unique.reverse();
 
   const counts={
@@ -216,8 +143,15 @@ app.get("/api/analysis", (req,res)=>{
     start:locations[startIndex], destination:locations[endIndex],
     route:routePoints, ...metrics, counts, detections:unique,
     dataset:{totalRows:rows.length,matchingRows:candidates.length,uniqueSignboards:unique.length,corridorMeters:70},
-    note:"Results are filtered from the uploaded CSV using proximity to the ordered campus waypoint route. Each detection image is resolved from the CSV snapshot filename inside backend/public/snapshots. If a matching file is not present, the interface displays Image not available."
+    note:"Results are read from the signs database and filtered by proximity to the ordered campus waypoint route. Repeat sightings of the same board are already merged into one record."
   });
+  } catch(e) { next(e); }
+});
+
+app.use((err,_req,res,_next)=>{
+  console.error(err);
+  if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({error:"File too large (max 2 GB)."});
+  res.status(500).json({error:err.message});
 });
 
 app.listen(PORT,()=>console.log(`IITM RoadSafe API running at http://localhost:${PORT}`));
